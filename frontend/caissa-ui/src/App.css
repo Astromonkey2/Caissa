@@ -1,0 +1,46 @@
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700;900&family=JetBrains+Mono:wght@300;400;500&display=swap');
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+:root {
+  --bg:         #0a0a0a;
+  --bg2:        #111111;
+  --bg3:        #1a1a1a;
+  --border:     #2a2a2a;
+  --text:       #e8e0d0;
+  --text2:      #8a8070;
+  --accent:     #c8a96e;
+  --accent2:    #e8c87e;
+  --red:        #c85050;
+  --green:      #50a878;
+  --blue:       #5080c8;
+  --font-serif: 'Playfair Display', Georgia, serif;
+  --font-mono:  'JetBrains Mono', 'Courier New', monospace;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* scrollbar */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+/* chess board background pattern */
+.chess-bg {
+  background-image:
+    repeating-conic-gradient(
+      rgba(200, 169, 110, 0.03) 0% 25%,
+      transparent 0% 50%
+    );
+  background-size: 40px 40px;
+}

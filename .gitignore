@@ -1,0 +1,38 @@
+# secrets — never commit these
+.env
+.env.local
+.env.*.local
+
+# python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# local database (use Supabase in production)
+data/
+
+# node
+node_modules/
+frontend/caissa-ui/build/
+frontend/caissa-ui/.env
+frontend/caissa-ui/.env.local
+
+# os / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# stockfish binary (install via apt or brew, not in repo)
+stockfish
+stockfish.exe

@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: caissa-api
+    dockerfilePath: ./Dockerfile
+    plan: free
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SERPER_API_KEY
+        sync: false
+      - key: STOCKFISH_PATH
+        value: /usr/bin/stockfish
+      - key: ANALYSIS_DEPTH
+        value: "8"
+      - key: PORT
+        value: "8000"
