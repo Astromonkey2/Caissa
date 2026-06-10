@@ -9,7 +9,7 @@ stockfish==3.28.0
 pandas==2.2.3
 numpy==1.26.4
 scikit-learn==1.5.2
-crewai==0.80.0
-crewai-tools==0.33.0
-litellm>=1.50.0
+crewai==0.63.6
+crewai-tools==0.17.0
+litellm>=1.35.0,<1.55.0
 apscheduler==3.11.2
