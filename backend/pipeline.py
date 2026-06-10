@@ -17,6 +17,11 @@ ANALYSIS_DEPTH = int(os.getenv("ANALYSIS_DEPTH", "8"))
 HEADERS        = {"User-Agent": "Caissa/1.0 chess analysis tool"}
 MAX_GAMES      = 150
 
+# log at import time so Railway shows this in startup logs
+import os as _os
+_sf_exists = _os.path.isfile(STOCKFISH_PATH) if STOCKFISH_PATH else False
+print(f"[pipeline] STOCKFISH_PATH={STOCKFISH_PATH!r}  exists={_sf_exists}")
+
 
 # ── HELPERS ───────────────────────────────────────────────
 def classify_mistake(cp_loss):
