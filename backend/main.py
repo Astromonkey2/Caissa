@@ -23,10 +23,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-supabase = create_client(
-    os.getenv("SUPABASE_URL"),
-    os.getenv("SUPABASE_KEY")
-)
+_supabase_url = os.getenv("SUPABASE_URL")
+_supabase_key = os.getenv("SUPABASE_KEY")
+
+if not _supabase_url or not _supabase_key:
+    raise RuntimeError(
+        "\n\n  Missing environment variables!\n"
+        "  Set SUPABASE_URL and SUPABASE_KEY before starting.\n"
+        "  Railway: project → Variables tab → add them there.\n"
+    )
+
+supabase = create_client(_supabase_url, _supabase_key)
 
 
 # ── BACKGROUND ANALYSIS ───────────────────────────────────
