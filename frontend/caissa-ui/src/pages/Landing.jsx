@@ -1,9 +1,8 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
+import { API } from '../lib/api';
 import './Landing.css';
-
-const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 export default function Landing() {
   const [username, setUsername] = useState('');

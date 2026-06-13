@@ -2,9 +2,8 @@ import React, { useState, useCallback, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import ChessBoard from '../components/ChessBoard';
+import { API } from '../lib/api';
 import './Report.css';
-
-const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 const CHESS_FACTS = [
   "Magnus Carlsen became a grandmaster at age 13.",

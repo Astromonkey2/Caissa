@@ -4,9 +4,8 @@ import axios from 'axios';
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
 } from 'recharts';
+import { API } from '../lib/api';
 import './Dashboard.css';
-
-const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 const STATUS_MESSAGES = {
   pending:     'Initializing...',
