@@ -45,10 +45,9 @@ npm run dev                                      # http://localhost:3000
 
 ## Notes
 
-- Python dependencies are pinned deliberately: `crewai==0.63.6` is the last
-  release compatible with `crewai-tools==0.17.0` (`structured_tool`), and
-  `httpx==0.27.2` is required by `supabase==2.9.1`. Don't bump these
-  without re-testing the agent pipeline end to end.
+- Python dependencies are pinned to a set verified end-to-end (a real crew
+  kickoff against Gemini + Serper). `crewai>=1.x` needs the `google-genai`
+  package for its native Gemini provider — keep them in sync when bumping.
 - `recharts` is pinned to v2 — v3 pulls in `eval`, which Vercel's CSP blocks.
 - `render.yaml` is a leftover from a previous Render deployment; Railway
   builds from the `Dockerfile`.

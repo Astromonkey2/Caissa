@@ -3,16 +3,6 @@ import sys
 import json
 import math
 import numpy as np
-import litellm
-
-try:
-    litellm.cache = type('Cache', (), {
-        'get':       lambda *a, **k: None,
-        'cache':     None,
-        'add_cache': lambda *a, **k: None,
-    })()
-except Exception:
-    pass
 
 from dotenv import load_dotenv
 from crewai import Agent, Task, Crew, LLM, Process
