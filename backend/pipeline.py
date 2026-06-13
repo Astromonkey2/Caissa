@@ -12,14 +12,36 @@ from dotenv import load_dotenv
 load_dotenv()
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-STOCKFISH_PATH = os.getenv("STOCKFISH_PATH")
+def _resolve_stockfish_path():
+    """
+    Find a usable Stockfish binary. The env var is tried first but NOT
+    trusted blindly — a stale STOCKFISH_PATH (e.g. /usr/bin/stockfish left
+    over from an old deployment) must not break analysis when the binary
+    actually lives elsewhere.
+    """
+    import shutil
+    candidates = [
+        os.getenv("STOCKFISH_PATH"),
+        shutil.which("stockfish"),
+        "/usr/local/bin/stockfish",
+        "/usr/games/stockfish",
+        "/usr/bin/stockfish",
+    ]
+    for c in candidates:
+        if c and os.path.isfile(c):
+            return c
+    return os.getenv("STOCKFISH_PATH")  # original behavior as last resort
+
+
+STOCKFISH_PATH = _resolve_stockfish_path()
 ANALYSIS_DEPTH = int(os.getenv("ANALYSIS_DEPTH", "8"))
 HEADERS        = {"User-Agent": "Caissa/1.0 chess analysis tool"}
 MAX_GAMES      = int(os.getenv("MAX_GAMES", "150"))
 
 # log at import time so Railway shows this in startup logs
 _sf_exists = os.path.isfile(STOCKFISH_PATH) if STOCKFISH_PATH else False
-print(f"[pipeline] STOCKFISH_PATH={STOCKFISH_PATH!r}  exists={_sf_exists}")
+print(f"[pipeline] STOCKFISH_PATH={STOCKFISH_PATH!r}  exists={_sf_exists}  "
+      f"(env was {os.getenv('STOCKFISH_PATH')!r})")
 
 
 # ── HELPERS ───────────────────────────────────────────────
