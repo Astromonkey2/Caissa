@@ -116,7 +116,9 @@ def run_agents_and_store(username: str) -> bool:
     crew   = build_crew(profile, collab, patterns)
     result = crew.kickoff()
 
-    coaching_json = extract_coaching_json(str(result))
+    # the pipeline exposes coaching JSON directly; fall back to scraping the
+    # combined text for older/!alternate result shapes
+    coaching_json = getattr(crew, "coaching_json", None) or extract_coaching_json(str(result))
 
     supabase.table("reports").delete().eq("username", username).execute()
     supabase.table("reports").insert({

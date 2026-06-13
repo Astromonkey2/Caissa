@@ -375,7 +375,7 @@ export default function Dashboard() {
           <section className="panel panel-wide report-panel">
             <h3 className="panel-title">
               AI Research Report
-              <span className="panel-badge">CrewAI</span>
+              <span className="panel-badge">Gemini</span>
               {report && (
                 <button
                   className="view-report-btn"

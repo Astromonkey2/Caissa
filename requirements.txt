@@ -1,6 +1,7 @@
-# Pinned to a locally end-to-end verified set (crew kickoff tested against
-# real Gemini + Serper APIs on 2026-06-12). litellm/httpx/pydantic are left
-# to the resolver — crewai and supabase bring compatible versions.
+# Verified end-to-end on 2026-06-13 (full report pipeline against real
+# Gemini + Serper APIs). The AI agents now use direct REST calls — no
+# crewai / crewai-tools / litellm — which removed a recurring class of
+# dependency-resolution failures on deploy.
 fastapi==0.116.1
 uvicorn[standard]==0.35.0
 python-dotenv==1.2.2
@@ -10,7 +11,4 @@ chess==1.11.2
 stockfish==5.2.0
 numpy==2.2.6
 scikit-learn==1.7.0
-crewai==1.14.5
-crewai-tools==1.14.5
-google-genai==2.8.0
 apscheduler==3.11.2

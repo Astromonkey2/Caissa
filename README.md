@@ -13,8 +13,10 @@ points, and tells you exactly what to study.
 
 Pipeline: fetch games → Stockfish / Lichess evals per move → blunder &
 phase stats → tactical pattern extraction (python-chess) → collaborative
-filter vs. reference players → 3 CrewAI agents (Gemini) write the diagnosis,
-coaching, and search for study resources (Serper).
+filter vs. reference players → 3-step AI report (`agents.CoachPipeline`)
+that writes the diagnosis, coaching JSON, and searches for study resources.
+The AI steps call the Gemini and Serper REST APIs directly via `requests`
+(no agent framework).
 
 ## Environment variables
 
@@ -45,9 +47,11 @@ npm run dev                                      # http://localhost:3000
 
 ## Notes
 
-- Python dependencies are pinned to a set verified end-to-end (a real crew
-  kickoff against Gemini + Serper). `crewai>=1.x` needs the `google-genai`
-  package for its native Gemini provider — keep them in sync when bumping.
+- Python dependencies are pinned to a set verified end-to-end (a real report
+  generation against Gemini + Serper). The report pipeline uses plain REST
+  calls, so there's no agent-framework version coupling to worry about.
+- Gemini model is configurable via the `GEMINI_MODEL` env var (default
+  `gemini-2.5-flash`).
 - `recharts` is pinned to v2 — v3 pulls in `eval`, which Vercel's CSP blocks.
 - `render.yaml` is a leftover from a previous Render deployment; Railway
   builds from the `Dockerfile`.

@@ -3,23 +3,59 @@ import sys
 import json
 import math
 import numpy as np
+import requests
 
 from dotenv import load_dotenv
-from crewai import Agent, Task, Crew, LLM, Process
-from crewai_tools import SerperDevTool
 
 load_dotenv()
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from conversion import chesscom_to_lichess
 
 
-# ── LLM ──────────────────────────────────────────────────
-def get_llm():
-    return LLM(
-        model="gemini/gemini-2.5-flash",
-        api_key=os.getenv("GEMINI_API_KEY"),
-        temperature=0.3
+# ── LLM + SEARCH (direct REST — no crewai/litellm) ────────
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
+
+def gemini_generate(prompt: str, temperature: float = 0.3, timeout: int = 120) -> str:
+    """Single-shot Gemini text generation via the public REST API."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY not set")
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={api_key}"
     )
+    body = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": temperature},
+    }
+    resp = requests.post(url, json=body, timeout=timeout)
+    resp.raise_for_status()
+    data = resp.json()
+    try:
+        parts = data["candidates"][0]["content"]["parts"]
+        return "".join(p.get("text", "") for p in parts).strip()
+    except (KeyError, IndexError):
+        return ""
+
+
+def serper_search(query: str, num: int = 5, timeout: int = 30) -> list:
+    """Google search via Serper. Returns the list of organic results."""
+    api_key = os.getenv("SERPER_API_KEY")
+    if not api_key:
+        return []
+    try:
+        resp = requests.post(
+            "https://google.serper.dev/search",
+            headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
+            json={"q": query, "num": num},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return resp.json().get("organic", [])
+    except Exception as e:
+        print(f"[serper] search failed for {query!r}: {e}")
+        return []
 
 
 # ── TACTICAL CLASSIFIER ───────────────────────────────────
@@ -507,184 +543,225 @@ def collaborative_filter(profile: dict, supabase) -> dict:
     }
 
 
-# ── STEP 3: BUILD CREW ────────────────────────────────────
-def build_crew(profile: dict, collab: dict, patterns: list) -> Crew:
-    llm         = get_llm()
-    search_tool = SerperDevTool(api_key=os.getenv("SERPER_API_KEY"))
+# ── STEP 3: COACHING PIPELINE (Gemini + Serper, direct) ───
+def _strip_code_fences(text: str) -> str:
+    t = (text or "").strip()
+    if t.startswith("```"):
+        t = t.split("\n", 1)[-1] if "\n" in t else t
+        if t.endswith("```"):
+            t = t[: t.rfind("```")]
+    return t.strip()
 
-    profile_str  = json.dumps(profile,  indent=2)
-    collab_str   = json.dumps(collab,   indent=2)
-    patterns_str = json.dumps(patterns, indent=2)
 
-    # ── Agent 1: Weakness Analyst ─────────────────────────
-    analyst = Agent(
-        role="Chess Data Analyst",
-        goal="Write a brutally specific, data-driven diagnosis of this player's current weakness",
-        backstory=(
-            "You are an expert chess analyst. You read raw statistics and "
-            "give highly specific diagnoses based on recent game data only. "
-            "You never give generic advice. Every claim references a specific number."
-        ),
-        llm=llm,
-        verbose=True,
-    )
+def _fallback_coaching(patterns: list) -> dict:
+    return {
+        "coaching": [
+            {
+                "tactic_type": p.get("tactic_type", "positional_blunder"),
+                "paragraph": (
+                    f"This {p.get('tactic_label', 'mistake')} pattern showed up "
+                    f"{p.get('frequency', 1)} times in your recent games, in the "
+                    f"{p.get('phase', 'middlegame')}. {p.get('tactic_detail', '')}."
+                ),
+                "checklist": [
+                    "Before every move, ask: does this leave any piece undefended or newly attacked?",
+                    "Visualize your opponent's best reply before you commit to the move.",
+                ],
+            }
+            for p in (patterns or [])
+        ]
+    }
 
-    # ── Agent 2: Tactical Coach ───────────────────────────
-    coach = Agent(
-        role="Chess Tactical Coach",
-        goal="Write personalized coaching paragraphs for each tactical pattern found in the player's games",
-        backstory=(
-            "You are a chess coach who analyzes specific tactical mistakes from real games. "
-            "You explain WHY a pattern keeps recurring, what the player is thinking wrong, "
-            "and give a concrete mental checklist to fix it. "
-            "You write like a human coach, not a computer. You reference specific positions."
-        ),
-        llm=llm,
-        verbose=True,
-    )
 
-    # ── Agent 3: Resource Researcher ─────────────────────
-    researcher = Agent(
-        role="Chess Resource Researcher",
-        goal="Find 3 highly specific resources matched to this player's exact weakness",
-        backstory=(
-            "You are a chess coach who finds obscure, highly targeted resources. "
-            "You NEVER recommend Chess Fundamentals #1 or generic beginner videos. "
-            "You find resources specific to the exact weakness, rating, and opening repertoire."
-        ),
-        tools=[search_tool],
-        llm=llm,
-        verbose=True,
-    )
+class CoachPipeline:
+    """
+    Drop-in replacement for the old CrewAI Crew. Runs three steps with direct
+    REST calls (Gemini for text, Serper for search) and exposes the same
+    `.kickoff()` interface, returning the combined diagnosis + resources text.
+    The coaching JSON is exposed separately as `.coaching_json`.
+    """
 
-    # ── Task 1: Diagnosis ─────────────────────────────────
-    analysis_task = Task(
-        description=f"""
-        Analyze this player's RECENT game data (last 150 games).
-        Their old games are irrelevant — focus on who they are NOW.
+    def __init__(self, profile: dict, collab: dict, patterns: list):
+        self.profile      = profile
+        self.collab       = collab
+        self.patterns     = patterns
+        self.coaching_json = None
 
-        RECENT GAME DATA:
-        {profile_str}
+    # ── step 1: diagnosis ─────────────────────────────────
+    def _diagnosis(self) -> str:
+        prompt = f"""You are an expert chess analyst. You give highly specific,
+data-driven diagnoses based ONLY on recent game data. Every claim references a
+specific number. You never give generic chess advice.
 
-        SIMILAR PLAYERS AT SAME RATING:
-        {collab_str}
+Analyze this player's RECENT game data (last {self.profile.get('games_analyzed', 150)} games).
 
-        Write a specific 3-4 paragraph diagnosis:
-        1. What is their single worst problem RIGHT NOW (use the blunder rates)
-        2. How bad is it compared to improving players at the same rating
-        3. What the numbers suggest about their thought process
-        4. Exact study prescription: what to do, how many minutes per day,
-           at what difficulty, for how long
+RECENT GAME DATA:
+{json.dumps(self.profile, indent=2)}
 
-        Be brutal and specific. Reference actual numbers.
-        Do NOT write generic chess advice.
-        """,
-        expected_output=(
-            "3-4 paragraphs of specific diagnosis with exact numbers, "
-            "comparison to improving players, and a concrete daily study plan."
-        ),
-        agent=analyst,
-    )
+SIMILAR PLAYERS AT SAME RATING:
+{json.dumps(self.collab, indent=2)}
 
-    # ── Task 2: Tactical Coaching ─────────────────────────
-    coaching_task = Task(
-        description=f"""
-        Write a personalized coaching paragraph for EACH of these tactical patterns
-        found in this player's real games.
+Write a specific 3-4 paragraph diagnosis:
+1. Their single worst problem RIGHT NOW (use the blunder rates).
+2. How bad it is compared to improving players at the same rating.
+3. What the numbers suggest about their thought process.
+4. An exact study prescription: what to do, how many minutes per day, at what
+   difficulty, for how long.
 
-        TACTICAL PATTERNS:
-        {patterns_str}
+Be brutal and specific. Reference actual numbers. Plain prose — no headers,
+no markdown bullets, no '###'."""
+        try:
+            return gemini_generate(prompt, temperature=0.3)
+        except Exception as e:
+            print(f"[pipeline] diagnosis failed: {e}")
+            wp = self.profile.get("worst_phase", "middlegame")
+            br = self.profile.get("phase_stats", {}).get(wp, {}).get("blunder_rate", 0)
+            return (
+                f"Your weakest phase is the {wp}, with a {br:.1%} blunder rate. "
+                f"Focus your training there."
+            )
 
-        PLAYER CONTEXT:
-        - Rating: {profile['chesscom_rating']}
-        - Worst phase: {profile['worst_phase']}
-        - Trend: {profile['trend']}
+    # ── step 2: coaching JSON ─────────────────────────────
+    def _coaching(self) -> str:
+        if not self.patterns:
+            data = _fallback_coaching([])
+            self.coaching_json = json.dumps(data)
+            return self.coaching_json
 
-        For EACH pattern write:
-        1. Why this pattern keeps recurring (what the player is thinking wrong)
-        2. The specific position context where it happens most
-        3. A concrete 2-step mental checklist to prevent it
-        4. How often this type of mistake costs rating points at this level
+        prompt = f"""You are a chess coach writing to a player directly. For EACH
+tactical pattern below, write personalized coaching.
 
-        Write like a human coach speaking directly to the player.
-        Reference the actual tactic type and phase.
-        Each coaching paragraph should be 4-6 sentences.
+TACTICAL PATTERNS:
+{json.dumps(self.patterns, indent=2)}
 
-        Format your response as JSON:
-        {{
-          "coaching": [
-            {{
-              "tactic_type": "...",
-              "paragraph": "...",
-              "checklist": ["step 1", "step 2"]
-            }}
-          ]
-        }}
-        """,
-        expected_output="JSON with coaching paragraphs for each pattern.",
-        agent=coach,
-        context=[analysis_task],
-    )
+PLAYER CONTEXT:
+- Rating: {self.profile.get('chesscom_rating')}
+- Worst phase: {self.profile.get('worst_phase')}
+- Trend: {self.profile.get('trend')}
 
-    # ── Task 3: Resources ─────────────────────────────────
-    research_task = Task(
-        description=f"""
-        You MUST use your search tool to find 5 specific study resources.
-        Do NOT invent or guess URLs. Only return URLs you actually find via search.
+For each pattern: explain WHY it keeps recurring (what they think wrong), the
+position context where it happens, a concrete 2-step mental checklist to prevent
+it, and how it costs rating at this level. 4-6 sentences per paragraph.
 
-        Player:
-        - Rating: {profile['chesscom_rating']} Chess.com (~{profile['lichess_equiv']} Lichess)
-        - Critical weakness: {profile['worst_phase']} blunders ({profile['phase_stats'][profile['worst_phase']]['blunder_rate']:.1%} rate)
-        - Most common mistake: {patterns[0]['tactic_label'] if patterns else 'positional errors'} — {patterns[0]['tactic_detail'] if patterns else ''}
-        - This occurs mainly in: {', '.join(patterns[0].get('all_openings', [])[:2]) if patterns else profile['best_opening']}
-        - Best opening: {profile['best_opening']} ({profile['best_opening_wr']:.0%} win rate)
+Respond with ONLY valid JSON, no markdown fences:
+{{"coaching": [{{"tactic_type": "...", "paragraph": "...", "checklist": ["step 1", "step 2"]}}]}}
+Use the exact tactic_type values from the patterns above."""
+        try:
+            raw   = gemini_generate(prompt, temperature=0.4)
+            clean = _strip_code_fences(raw)
+            data  = json.loads(clean)
+            if isinstance(data, dict) and data.get("coaching"):
+                self.coaching_json = json.dumps(data)
+                return self.coaching_json
+        except Exception as e:
+            print(f"[pipeline] coaching failed, using fallback: {e}")
+        self.coaching_json = json.dumps(_fallback_coaching(self.patterns))
+        return self.coaching_json
 
-        Each search must target a DIFFERENT format and platform. Do NOT return two YouTube videos on the same topic.
+    # ── step 3: resources (search + format) ───────────────
+    def _resources(self) -> str:
+        p        = self.profile
+        wp       = p.get("worst_phase", "middlegame")
+        rating   = p.get("chesscom_rating", 1200)
+        top      = self.patterns[0] if self.patterns else None
+        label    = top["tactic_label"] if top else wp
+        best_op  = p.get("best_opening", "your main opening")
 
-        REQUIRED SEARCHES — run all 5, one distinct resource each:
+        searches = [
+            ("youtube",  f"Daniel Naroditsky {label} chess lesson"),
+            ("lichess",  f"lichess.org study {wp} tactics"),
+            ("youtube",  f"{best_op} chess opening explained Hanging Pawns"),
+            ("article",  f"how to stop {label} chess improvement article"),
+            ("youtube",  f"{wp} chess improvement {rating} rating tips"),
+        ]
 
-        Search 1 (YouTube — specific coach, tactical pattern):
-          "Danya Naroditsky {patterns[0]['tactic_label'] if patterns else profile['worst_phase']} chess"
-          → Return a YouTube video from Naroditsky (derekhatemychess / danya) or GothamChess (Levy Rozman).
+        def pick(kind, results, used):
+            for r in results:
+                link = r.get("link", "")
+                if not link.startswith("http") or link in used:
+                    continue
+                is_yt  = "youtube.com" in link or "youtu.be" in link
+                is_li  = "lichess.org" in link
+                if kind == "youtube" and not is_yt:
+                    continue
+                if kind == "lichess" and not is_li:
+                    continue
+                if kind == "article" and (is_yt or is_li):
+                    continue
+                return r
+            # fall back to first usable result of any kind
+            for r in results:
+                link = r.get("link", "")
+                if link.startswith("http") and link not in used:
+                    return r
+            return None
 
-        Search 2 (Lichess interactive study — NOT YouTube):
-          "site:lichess.org/study {profile['worst_phase']} tactics puzzle"
-          → Return a lichess.org/study/... URL. Must not be YouTube.
+        used, chosen = set(), []
+        for kind, query in searches:
+            picked = pick(kind, serper_search(query, num=8), used)
+            if picked:
+                used.add(picked["link"])
+                chosen.append((kind, query, picked))
 
-        Search 3 (Opening-specific — a DIFFERENT coach or channel than Search 1):
-          "{profile['best_opening']} chess opening explained John Bartholomew OR ChessNetwork OR Hanging Pawns"
-          → Return a YouTube video specifically about the {profile['best_opening']} opening.
+        if not chosen:
+            return ""
 
-        Search 4 (Written article or blog — NOT YouTube, NOT Lichess):
-          "{patterns[0]['tactic_label'] if patterns else profile['worst_phase']} chess improvement article chess.com OR chessbase.com OR chess24.com"
-          → Return an article URL (chess.com/learn, chessbase.com, etc.) — NOT a video.
+        # let Gemini write the per-resource relevance, but only over real URLs
+        candidates = [
+            {"title": c[2].get("title", "Resource"),
+             "url":   c[2]["link"],
+             "snippet": c[2].get("snippet", "")}
+            for c in chosen
+        ]
+        prompt = f"""A chess player rated {rating} (~{p.get('lichess_equiv')} Lichess)
+has a critical weakness in the {wp} ({label}). Their best opening is {best_op}.
 
-        Search 5 (Rating-specific YouTube — different topic from Search 1 and 3):
-          "{profile['worst_phase']} chess {profile['chesscom_rating']} rating improvement tips youtube"
-          → Return a YouTube video focused on the {profile['worst_phase']} phase at ~{profile['chesscom_rating']} rating.
-          Must be a DIFFERENT video and channel than Search 1.
+Below are real, verified study resources (use these EXACT urls — do not change
+or invent any). For each, write one sentence of relevance to THIS player's
+{label} problem.
 
-        FORMAT (repeat for each 1–5):
-        ### N.
-        **Title:** [exact title]
-        **URL:** [exact URL found — must start with https://]
-        **Relevance:** [one sentence: why this specific resource helps THIS player's {patterns[0]['tactic_label'] if patterns else profile['worst_phase']} problem]
-        """,
-        expected_output=(
-            "5 resources on 5 different platforms/formats: 1 Danya/Gotham YouTube, "
-            "1 Lichess study, 1 opening YouTube, 1 written article, 1 phase-improvement YouTube. "
-            "All URLs verified via search."
-        ),
-        agent=researcher,
-        context=[analysis_task],
-    )
+RESOURCES:
+{json.dumps(candidates, indent=2)}
 
-    return Crew(
-        agents=[analyst, coach, researcher],
-        tasks=[analysis_task, coaching_task, research_task],
-        process=Process.sequential,
-        verbose=True,
-    )
+Output EXACTLY this markdown, one block per resource, numbered from 1:
+### 1.
+**Title:** <title>
+**URL:** <exact url>
+**Relevance:** <one sentence>
+
+No preamble, no closing text."""
+        try:
+            md = gemini_generate(prompt, temperature=0.3)
+            if "**URL:**" in md and "https://" in md:
+                return md.strip()
+        except Exception as e:
+            print(f"[pipeline] resource formatting failed, using template: {e}")
+
+        # deterministic fallback formatting
+        lines = []
+        for i, (kind, query, r) in enumerate(chosen, 1):
+            lines.append(f"### {i}.")
+            lines.append(f"**Title:** {r.get('title', 'Resource')}")
+            lines.append(f"**URL:** {r['link']}")
+            lines.append(f"**Relevance:** Matched to your {label} weakness in the {wp}.")
+            lines.append("")
+        return "\n".join(lines).strip()
+
+    def kickoff(self) -> str:
+        print("[pipeline] step 1/3 — diagnosis...")
+        diagnosis = self._diagnosis()
+        print("[pipeline] step 2/3 — coaching...")
+        self._coaching()
+        print("[pipeline] step 3/3 — researching resources...")
+        resources = self._resources()
+        parts = [diagnosis.strip()]
+        if resources:
+            parts.append(resources.strip())
+        return "\n\n".join(parts)
+
+
+def build_crew(profile: dict, collab: dict, patterns: list) -> CoachPipeline:
+    return CoachPipeline(profile, collab, patterns)
 
 
 def analyze_opening_deviations(username: str, supabase) -> list:
