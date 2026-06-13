@@ -15,11 +15,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 STOCKFISH_PATH = os.getenv("STOCKFISH_PATH")
 ANALYSIS_DEPTH = int(os.getenv("ANALYSIS_DEPTH", "8"))
 HEADERS        = {"User-Agent": "Caissa/1.0 chess analysis tool"}
-MAX_GAMES      = 150
+MAX_GAMES      = int(os.getenv("MAX_GAMES", "150"))
 
 # log at import time so Railway shows this in startup logs
-import os as _os
-_sf_exists = _os.path.isfile(STOCKFISH_PATH) if STOCKFISH_PATH else False
+_sf_exists = os.path.isfile(STOCKFISH_PATH) if STOCKFISH_PATH else False
 print(f"[pipeline] STOCKFISH_PATH={STOCKFISH_PATH!r}  exists={_sf_exists}")
 
 
@@ -121,7 +120,7 @@ def analyze_games(username: str, games_data: list, supabase) -> None:
             result_r = game_data[color]["result"]
             result   = (
                 "win"  if result_r == "win" else
-                "loss" if result_r in ["checkmated", "timeout", "resigned", "lose"] else
+                "loss" if result_r in ["checkmated", "timeout", "resigned", "abandoned", "lose"] else
                 "draw"
             )
 

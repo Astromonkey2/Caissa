@@ -317,20 +317,29 @@ def extract_blunder_patterns(username: str, supabase) -> list:
 def get_weakness_profile(username: str, supabase) -> dict:
     games_res = supabase.table("games").select(
         "game_id, result, your_rating, opening_name, color, date"
-    ).eq("username", username).order("date", desc=True).limit(100).execute()
+    ).eq("username", username).order("date", desc=True).limit(150).execute()
     games = games_res.data
 
     if not games:
         return {}
 
-    recent_ids = [g["game_id"] for g in games[:150]]
+    # batch by chunks of game ids (keeps URLs short), and page each chunk
+    # past PostgREST's 1000-row cap
+    recent_ids = [g["game_id"] for g in games]
     all_moves  = []
-    for gid in recent_ids:
+    for c in range(0, len(recent_ids), 50):
+        chunk = recent_ids[c:c + 50]
         try:
-            res = supabase.table("moves").select(
-                "game_phase, mistake_type, centipawn_loss"
-            ).eq("game_id", gid).execute()
-            all_moves.extend(res.data)
+            start = 0
+            while True:
+                res = supabase.table("moves").select(
+                    "game_phase, mistake_type, centipawn_loss"
+                ).in_("game_id", chunk).range(start, start + 999).execute()
+                data = res.data or []
+                all_moves.extend(data)
+                if len(data) < 1000:
+                    break
+                start += 1000
         except Exception:
             continue
     moves = all_moves
@@ -412,7 +421,7 @@ def get_weakness_profile(username: str, supabase) -> dict:
         "chesscom_rating":  current_r,
         "lichess_equiv":    chesscom_to_lichess(current_r)[0],
         "total_games":      len(games),
-        "games_analyzed":   150,
+        "games_analyzed":   len(games),
         "overall_win_rate": round(overall_wr, 4),
         "phase_stats":      phase_stats,
         "worst_phase":      worst_phase,
@@ -900,7 +909,7 @@ if __name__ == "__main__":
         os.getenv("SUPABASE_KEY"),
     )
 
-    username = "Chesspin_one"
+    username = sys.argv[1] if len(sys.argv) > 1 else "Chesspin_one"
     print(f"\n► Building profile for {username}...")
     profile = get_weakness_profile(username, supabase)
     if not profile:

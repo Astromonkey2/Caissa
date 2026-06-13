@@ -2,8 +2,7 @@ import os
 import sys
 import json
 import math
-import re
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -16,9 +15,12 @@ from supabase import create_client
 
 app = FastAPI(title="Caissa API")
 
+# Comma-separated list, e.g. "https://caissa.vercel.app,http://localhost:3000".
+# Defaults to * so existing deployments keep working until the var is set.
+_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_origins or ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -36,6 +38,99 @@ if not _supabase_url or not _supabase_key:
 supabase = create_client(_supabase_url, _supabase_key)
 
 
+# ── HELPERS ───────────────────────────────────────────────
+def utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def set_status(username: str, status: str, **extra):
+    supabase.table("users").update({"status": status, **extra}).eq(
+        "username", username
+    ).execute()
+
+
+def fetch_all(build_query, page_size: int = 1000) -> list:
+    """
+    Collect every row from a PostgREST query, paging past the 1000-row
+    server cap. `build_query` is a zero-arg callable returning a fresh
+    (unexecuted) query each call.
+    """
+    rows, start = [], 0
+    while True:
+        res = build_query().range(start, start + page_size - 1).execute()
+        data = res.data or []
+        rows.extend(data)
+        if len(data) < page_size:
+            return rows
+        start += page_size
+
+
+def extract_coaching_json(text: str):
+    """
+    Find the JSON object containing the "coaching" key by balancing braces
+    (handles nested objects, which a regex cannot).
+    """
+    if not text:
+        return None
+    idx = text.find('"coaching"')
+    while idx != -1:
+        start = text.rfind("{", 0, idx)
+        if start != -1:
+            depth = 0
+            for i in range(start, len(text)):
+                c = text[i]
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        candidate = text[start:i + 1]
+                        try:
+                            json.loads(candidate)
+                            return candidate
+                        except Exception:
+                            break
+        idx = text.find('"coaching"', idx + 1)
+    return None
+
+
+def run_agents_and_store(username: str) -> bool:
+    """
+    Build the weakness profile, run the CrewAI agents, and replace the
+    user's report. Returns False when there is no data to work with.
+    """
+    from agents import (
+        get_weakness_profile, collaborative_filter,
+        build_crew, extract_blunder_patterns,
+    )
+
+    profile = get_weakness_profile(username, supabase)
+    if not profile:
+        return False
+
+    collab   = collaborative_filter(profile, supabase)
+    patterns = extract_blunder_patterns(username, supabase)
+
+    print(f"[{username}] Found {len(patterns)} tactical patterns")
+
+    crew   = build_crew(profile, collab, patterns)
+    result = crew.kickoff()
+
+    coaching_json = extract_coaching_json(str(result))
+
+    supabase.table("reports").delete().eq("username", username).execute()
+    supabase.table("reports").insert({
+        "username":        username,
+        "weakness_phase":  profile["worst_phase"],
+        "blunder_rate":    profile["phase_stats"][profile["worst_phase"]]["blunder_rate"],
+        "recommendations": json.dumps(profile, default=str),
+        "resources":       str(result),
+        "patterns":        json.dumps(patterns, default=str),
+        "coaching":        coaching_json,
+    }).execute()
+    return True
+
+
 # ── BACKGROUND ANALYSIS ───────────────────────────────────
 def run_analysis(username: str, platform: str = "chesscom"):
     try:
@@ -44,9 +139,7 @@ def run_analysis(username: str, platform: str = "chesscom"):
             fetch_lichess_games, analyze_lichess_games,
         )
 
-        supabase.table("users").update(
-            {"status": "fetching"}
-        ).eq("username", username).execute()
+        set_status(username, "fetching")
 
         # compute since timestamp for incremental fetch
         since_ts = None
@@ -55,8 +148,7 @@ def run_analysis(username: str, platform: str = "chesscom"):
             user_row = supabase.table("users").select("last_sync").eq("username", username).execute()
             last_sync_str = user_row.data[0].get("last_sync") if user_row.data else None
             if last_sync_str:
-                from datetime import timezone
-                last_dt = datetime.fromisoformat(last_sync_str.replace("Z", "+00:00"))
+                last_dt  = datetime.fromisoformat(last_sync_str.replace("Z", "+00:00"))
                 since_ts = int(last_dt.timestamp())
                 since_ms = since_ts * 1000
         except Exception:
@@ -70,9 +162,17 @@ def run_analysis(username: str, platform: str = "chesscom"):
             games = fetch_games(username, since_ts=since_ts)
 
         if not games:
-            supabase.table("users").update(
-                {"status": "error"}
-            ).eq("username", username).execute()
+            # Incremental sync with nothing new is success, not failure —
+            # only error out if the user has no stored games at all.
+            existing = supabase.table("games").select("game_id").eq(
+                "username", username
+            ).limit(1).execute()
+            if existing.data:
+                print(f"[{username}] No new games — keeping existing report.")
+                set_status(username, "ready", last_sync=utcnow_iso())
+            else:
+                print(f"[{username}] No games found for this account.")
+                set_status(username, "error")
             return
 
         if platform == "lichess":
@@ -84,10 +184,7 @@ def run_analysis(username: str, platform: str = "chesscom"):
             color = "white" if games[0]["white"]["username"].lower() == username.lower() else "black"
             current_rating = games[0][color]["rating"]
 
-        supabase.table("users").update({
-            "status":         "analyzing",
-            "rating_current": current_rating,
-        }).eq("username", username).execute()
+        set_status(username, "analyzing", rating_current=current_rating)
 
         print(f"[{username}] Running analysis ({platform})...")
         if platform == "lichess":
@@ -95,62 +192,19 @@ def run_analysis(username: str, platform: str = "chesscom"):
         else:
             analyze_games(username, games, supabase)
 
-        supabase.table("users").update(
-            {"status": "researching"}
-        ).eq("username", username).execute()
+        set_status(username, "researching")
 
         print(f"[{username}] Running agents...")
-        from agents import (
-            get_weakness_profile, collaborative_filter,
-            build_crew, extract_blunder_patterns,
-        )
-
-        profile = get_weakness_profile(username, supabase)
-        if not profile:
-            supabase.table("users").update(
-                {"status": "error"}
-            ).eq("username", username).execute()
+        if not run_agents_and_store(username):
+            set_status(username, "error")
             return
 
-        collab   = collaborative_filter(profile, supabase)
-        patterns = extract_blunder_patterns(username, supabase)
-
-        print(f"[{username}] Found {len(patterns)} tactical patterns")
-
-        crew   = build_crew(profile, collab, patterns)
-        result = crew.kickoff()
-
-        coaching_json = None
-        try:
-            match = re.search(r'\{[^{}]*"coaching"[^{}]*\[.*?\]\s*\}', str(result), re.DOTALL)
-            if match:
-                coaching_json = match.group(0)
-        except Exception:
-            pass
-
-        supabase.table("reports").delete().eq("username", username).execute()
-        supabase.table("reports").insert({
-            "username":        username,
-            "weakness_phase":  profile["worst_phase"],
-            "blunder_rate":    profile["phase_stats"][profile["worst_phase"]]["blunder_rate"],
-            "recommendations": json.dumps(profile, default=str),
-            "resources":       str(result),
-            "patterns":        json.dumps(patterns, default=str),
-            "coaching":        coaching_json,
-        }).execute()
-
-        supabase.table("users").update({
-            "status":    "ready",
-            "last_sync": datetime.utcnow().isoformat(),
-        }).eq("username", username).execute()
-
+        set_status(username, "ready", last_sync=utcnow_iso())
         print(f"[{username}] Done.")
 
     except Exception as e:
         print(f"[{username}] Error: {e}")
-        supabase.table("users").update(
-            {"status": "error"}
-        ).eq("username", username).execute()
+        set_status(username, "error")
 
 
 # ── ENDPOINTS ─────────────────────────────────────────────
@@ -160,12 +214,21 @@ def root():
     return {"message": "Caissa API running"}
 
 
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok"}
+
+
 @app.post("/api/onboard/{username}")
 async def onboard(
     username:         str,
     background_tasks: BackgroundTasks,
     platform:         str = Query("chesscom"),
 ):
+    username = username.strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="Username required")
+
     existing = supabase.table("users").select("*").eq("username", username).execute()
 
     if existing.data:
@@ -204,18 +267,19 @@ def get_profile(username: str):
         "username", username
     ).order("created_at", desc=True).limit(1).execute()
 
-    games = supabase.table("games").select(
+    # paginate — these tables routinely exceed the 1000-row PostgREST cap
+    games = fetch_all(lambda: supabase.table("games").select(
         "game_id, result, your_rating, opening_name, color, date"
-    ).eq("username", username).execute()
+    ).eq("username", username))
 
-    moves = supabase.table("moves").select(
+    moves = fetch_all(lambda: supabase.table("moves").select(
         "game_phase, mistake_type, centipawn_loss"
-    ).eq("username", username).execute()
+    ).eq("username", username))
 
     # phase stats
     phase_stats = {}
     for phase in ["opening", "middlegame", "endgame"]:
-        pm = [m for m in moves.data if m["game_phase"] == phase]
+        pm = [m for m in moves if m["game_phase"] == phase]
         if pm:
             blunders = sum(1 for m in pm if m["mistake_type"] == "blunder")
             phase_stats[phase] = {
@@ -226,7 +290,7 @@ def get_profile(username: str):
     # opening stats — min 5 games
     from collections import defaultdict
     op = defaultdict(lambda: {"wins": 0, "draws": 0, "total": 0})
-    for g in games.data:
+    for g in games:
         name = g["opening_name"] or "Unknown"
         op[name]["total"] += 1
         if g["result"] == "win":
@@ -249,7 +313,7 @@ def get_profile(username: str):
     opening_stats.sort(key=lambda x: x["win_rate"], reverse=True)
 
     # recent win rate (last 50 games)
-    sorted_games = sorted(games.data, key=lambda x: x["date"], reverse=True)
+    sorted_games = sorted(games, key=lambda x: x["date"], reverse=True)
     recent_50    = sorted_games[:50]
     wins         = sum(1 for g in recent_50 if g["result"] == "win")
     overall_wr   = wins / len(recent_50) if recent_50 else 0
@@ -276,7 +340,7 @@ def get_profile(username: str):
         "opening_stats":    opening_stats,
         "rating_history":   ratings,
         "overall_win_rate": round(overall_wr, 4),
-        "total_games":      len(games.data),
+        "total_games":      len(games),
         "report":           report.data[0] if report.data else None,
         "worst_phase":      worst_phase,
     }
@@ -408,54 +472,16 @@ async def generate_report(username: str, background_tasks: BackgroundTasks):
     if user.data[0]["status"] == "researching":
         return {"message": "Already generating", "status": "researching"}
 
-    supabase.table("users").update(
-        {"status": "researching"}
-    ).eq("username", username).execute()
+    set_status(username, "researching")
 
     def run_agents():
         try:
-            from agents import (
-                get_weakness_profile, collaborative_filter,
-                build_crew, extract_blunder_patterns,
-            )
-
-            profile  = get_weakness_profile(username, supabase)
-            collab   = collaborative_filter(profile, supabase)
-            patterns = extract_blunder_patterns(username, supabase)
-
-            print(f"[{username}] Found {len(patterns)} tactical patterns")
-
-            crew   = build_crew(profile, collab, patterns)
-            result = crew.kickoff()
-
-            coaching_json = None
-            try:
-                match = re.search(r'\{[^{}]*"coaching"[^{}]*\[.*?\]\s*\}', str(result), re.DOTALL)
-                if match:
-                    coaching_json = match.group(0)
-            except Exception:
-                pass
-
-            supabase.table("reports").delete().eq("username", username).execute()
-            supabase.table("reports").insert({
-                "username":        username,
-                "weakness_phase":  profile["worst_phase"],
-                "blunder_rate":    profile["phase_stats"][profile["worst_phase"]]["blunder_rate"],
-                "recommendations": json.dumps(profile, default=str),
-                "resources":       str(result),
-                "patterns":        json.dumps(patterns, default=str),
-                "coaching":        coaching_json,
-            }).execute()
-
-            supabase.table("users").update(
-                {"status": "ready"}
-            ).eq("username", username).execute()
-
+            run_agents_and_store(username)
         except Exception as e:
             print(f"[{username}] Agent error: {e}")
-            supabase.table("users").update(
-                {"status": "ready"}
-            ).eq("username", username).execute()
+        finally:
+            # the user still has their data — never strand them in "researching"
+            set_status(username, "ready")
 
     background_tasks.add_task(run_agents)
     return {"message": "Report generation started", "status": "researching"}
@@ -469,7 +495,7 @@ def reference_stats():
 
     from collections import defaultdict
     bands = defaultdict(list)
-    for r in result.data:
+    for r in (result.data or []):
         bands[r["rating_band"]].append(r)
 
     stats = []
@@ -478,10 +504,10 @@ def reference_stats():
             "rating_band":     band,
             "player_count":    len(players),
             "avg_mid_blunder": round(
-                sum(p["middlegame_blunder_rate"] for p in players) / len(players), 4
+                sum(p["middlegame_blunder_rate"] or 0 for p in players) / len(players), 4
             ),
             "avg_win_rate":    round(
-                sum(p["overall_win_rate"] for p in players) / len(players), 4
+                sum(p["overall_win_rate"] or 0 for p in players) / len(players), 4
             ),
         })
 
@@ -501,7 +527,6 @@ def get_openings(username: str):
 
 # ── SCHEDULER: daily auto-sync ────────────────────────────
 from apscheduler.schedulers.background import BackgroundScheduler
-from datetime import timezone as _tz
 
 def _daily_sync_job():
     """Re-sync every ready user whose data is >20 hours old."""
@@ -510,7 +535,7 @@ def _daily_sync_job():
             "username, last_sync, platform"
         ).eq("status", "ready").execute()
 
-        now = datetime.now(_tz.utc)
+        now = datetime.now(timezone.utc)
         for u in (users.data or []):
             try:
                 ls = u.get("last_sync")
