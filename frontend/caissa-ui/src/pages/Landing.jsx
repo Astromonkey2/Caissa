@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import './Landing.css';
 
-const API = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 export default function Landing() {
   const [username, setUsername] = useState('');
@@ -21,7 +21,7 @@ export default function Landing() {
       await axios.post(`${API}/api/onboard/${username.trim()}?platform=${platform}`);
       navigate(`/dashboard/${username.trim()}`);
     } catch (err) {
-      setError('Could not reach the server. Is FastAPI running?');
+      setError('Could not reach the analysis server. Please try again in a moment.');
       setLoading(false);
     }
   };

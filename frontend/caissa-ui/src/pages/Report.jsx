@@ -1,9 +1,10 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import axios from 'axios';
+import ChessBoard from '../components/ChessBoard';
 import './Report.css';
 
-const API = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 const CHESS_FACTS = [
   "Magnus Carlsen became a grandmaster at age 13.",
@@ -137,6 +138,36 @@ function PatternCard({ pattern, coaching }) {
         <span className="severity-val" style={{ color: severityColor }}>{avgLoss} pawns avg</span>
       </div>
 
+      {pattern.example?.fen && (
+        <div className="pattern-board-row">
+          <ChessBoard
+            fen={pattern.example.fen}
+            movePlayed={pattern.example.move_played}
+            bestMove={pattern.example.best_move}
+            orientation={pattern.example.user_color === 'black' ? 'black' : 'white'}
+          />
+          <div className="board-caption">
+            <div className="bc-title">
+              Worst example
+              {pattern.example.move_number ? ` — move ${pattern.example.move_number}` : ''}
+              {pattern.example.opening ? ` · ${pattern.example.opening}` : ''}
+            </div>
+            <div className="bc-line">
+              <span className="bc-dot bc-red" />
+              You played <strong>{pattern.example.move_played}</strong>
+              {pattern.example.cp_loss ? ` (−${Math.round(pattern.example.cp_loss)} centipawns)` : ''}
+            </div>
+            {pattern.example.best_move && (
+              <div className="bc-line">
+                <span className="bc-dot bc-green" />
+                Engine preferred <strong>{pattern.example.best_move}</strong>
+              </div>
+            )}
+            {pattern.example.date && <div className="bc-date">{pattern.example.date}</div>}
+          </div>
+        </div>
+      )}
+
       {pattern.all_openings?.length > 0 && (
         <div className="pattern-openings-row">
           <span className="po-label">Occurs in:</span>
@@ -230,6 +261,84 @@ function OpeningRepertoire({ openings }) {
         <span style={{ color: '#c8a96e' }}>■</span> Needs work (35–55%)&nbsp;&nbsp;
         <span style={{ color: '#c85050' }}>■</span> Consider dropping (&lt;35%)
       </p>
+    </div>
+  );
+}
+
+// ── OPENING THEORY DEVIATIONS ─────────────────────────────
+function OpeningDeviations({ username }) {
+  const [state, setState] = useState('idle'); // idle | loading | done | error
+  const [devs,  setDevs]  = useState([]);
+
+  const run = async () => {
+    setState('loading');
+    try {
+      const res = await axios.get(`${API}/api/openings/${username}`, { timeout: 300000 });
+      setDevs(res.data.deviations || []);
+      setState('done');
+    } catch {
+      setState('error');
+    }
+  };
+
+  if (state === 'idle') {
+    return (
+      <div className="dev-idle">
+        <p>
+          Compare the first moves of your recent games against the Lichess
+          database to find the exact move where you leave known theory.
+        </p>
+        <button className="analyze-btn" onClick={run}>
+          ♘ Check my openings against theory
+        </button>
+      </div>
+    );
+  }
+
+  if (state === 'loading') {
+    return (
+      <p className="dev-loading">
+        ⟳ Querying the Lichess opening explorer for your last 10 games —
+        this takes a minute or two. Leave this page open.
+      </p>
+    );
+  }
+
+  if (state === 'error') {
+    return <p className="no-data">Could not reach the opening explorer. Try again in a moment.</p>;
+  }
+
+  if (devs.length === 0) {
+    return <p className="no-data">No deviations found — your recent openings all follow known theory.</p>;
+  }
+
+  return (
+    <div className="dev-list">
+      {devs.map((d, i) => (
+        <div key={i} className="dev-card">
+          <div className="dev-head">
+            <span className="dev-opening">{d.opening}{d.eco ? ` (${d.eco})` : ''}</span>
+            <span className="dev-freq">{d.frequency}× · avg move {d.avg_move_num}</span>
+          </div>
+          <p className="dev-detail">
+            {d.example.type === 'out_of_book' ? (
+              <>On move {d.example.move_number} you played{' '}
+                <strong>{d.example.user_move_san}</strong> — a position with no
+                recorded games. You're improvising from there.</>
+            ) : (
+              <>On move {d.example.move_number} you played{' '}
+                <strong>{d.example.user_move_san}</strong>; theory prefers{' '}
+                <strong>{d.example.theory_san}</strong>
+                {d.example.theory_games ? ` (${d.example.theory_games.toLocaleString()} games)` : ''}.</>
+            )}
+            {d.blunder_count > 0 && (
+              <span className="dev-blunder">
+                {' '}{d.blunder_count} of these games included a blunder soon after.
+              </span>
+            )}
+          </p>
+        </div>
+      ))}
     </div>
   );
 }
@@ -521,9 +630,22 @@ export default function Report() {
 
         <div className="rp-divider" />
 
-        {/* ── 04 STUDY PLAN ── */}
+        {/* ── 04 OPENING THEORY ── */}
         <section className="rp-section">
-          <div className="section-label">04 — study plan</div>
+          <div className="section-label">04 — theory check</div>
+          <h2 className="rp-section-title">Where you leave the book</h2>
+          <p className="rp-section-sub">
+            Your moves compared against millions of Lichess games — the exact move
+            where each of your openings goes off known theory.
+          </p>
+          <OpeningDeviations username={username} />
+        </section>
+
+        <div className="rp-divider" />
+
+        {/* ── 05 STUDY PLAN ── */}
+        <section className="rp-section">
+          <div className="section-label">05 — study plan</div>
           <h2 className="rp-section-title">What to do next, in order</h2>
           <p className="rp-section-sub">
             Prioritized based on your actual data — what will move the needle fastest at your rating.
@@ -533,9 +655,9 @@ export default function Report() {
 
         <div className="rp-divider" />
 
-        {/* ── 05 STUDY RESOURCES ── */}
+        {/* ── 06 STUDY RESOURCES ── */}
         <section className="rp-section">
-          <div className="section-label">05 — study resources</div>
+          <div className="section-label">06 — study resources</div>
           <h2 className="rp-section-title">Specific resources to use</h2>
           <p className="rp-section-sub">
             Found by AI agents searching YouTube, Lichess, and chess articles — each matched to your specific weakness.
